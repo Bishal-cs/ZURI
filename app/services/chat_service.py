@@ -128,6 +128,54 @@ class ChatService:
     # MESSAGE AND HISTORY FORMATTING
     # ----------------------------------------------------
     
+    def add_message(self, session_id: str, role: str, content: str):
+        """Append one message (user or assistant) to the session's message list. Creates session if missing."""
+        if session_id not in self.sessions:
+            self.sessions[session_id] = []
+        self.sessions[session_id].append(ChatMessage(role=role, content=content))
+    
+    def get_chat_history(self, session_id: str) -> List[ChatMessage]:
+        """Return the list of messages for this session (chronological). Empty list if session unknown."""
+        return self.sessions.get(session_id, [])
+    
+    def format_history_for_llm(self, session_id: str, exclude_last: bool = False) -> list[tuple]:
+        """
+        Build a list of (user_text, assistant_text) pairs for the LLM prompt.
         
+        We only include complete pairs and cap at MAX_CHAT_HISTORY_TURNS (e.g. 20)
+        so the prompt does not grow unbounded. If exclude_last is True, we drop the last message (the current user message that we are about to reply to).
+        """
+        messages = self.get_chat_history(session_id)
+        history = []
+        # if exclude_last, we skip the last message (the current user message we are about to reply to).
+        messages_to_process = messages[:-1] if exclude_last and messages else messages
+        i = 0 
+        while i < len(messages_to_process) - 1:
+            user_msg = messages_to_process[i]
+            ai_msg = messages_to_process[i + 1]
+            if user_msg.role == "user" and ai_msg.role == "assistant":
+                history.append((user_msg.content, ai_msg.content))
+                i += 2
+            else: 
+                i += 1
+        # Keep only the most recent turns so the prompt does not excedd token limit.
+        if len(history) > MAX_CHAT_HISTORY_TURNS:
+            history = history[-MAX_CHAT_HISTORY_TURNS:]
+        return history
 
-            
+    # ----------------------------------------------------
+    # PROCESS MESSAGES (GENERAL AND REALTIME)
+    # ----------------------------------------------------
+
+    def process_message(self, session_id: str, user_message: str) -> str:
+        """
+        Handle one general-chat message: add user message, call Groq (no web search), add reply, return it. 
+        """
+        self.add_message(session_id, "user", user_message)
+        chat_history = self.format_history_for_llm(session_id, exclude_last=True)
+        response = self.groq_service.get_response(question = user_message, chat_history = chat_history)
+        self.add_message(session_id, "assistant", response)
+        return response
+    
+    def process_realtime_message(self, session_id: str, user_message: str) -> str:
+        
