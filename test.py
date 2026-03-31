@@ -1,5 +1,5 @@
 """
-TERMINATOR TEST SCRIPT - General and Realtime Chat Selector
+SYLPH TEST SCRIPT - General and Realtime Chat Selector
 ========================================================
 PURPOSE:
 This is a command-line test interface for interacting with S.Y.L.P.H.
@@ -35,7 +35,7 @@ from datetime import datetime
 from uuid import uuid4
 
 try:
-    from config import ASSISTANT_NAME
+    from app.config import ASSISTANT_NAME
 except ImportError:
     ASSISTANT_NAME = "SYLPH"
 
@@ -94,7 +94,7 @@ def send_message(message, mode):
         mode: Either "general" or "realtime" to determine which endpoint to use
     
     Returns:
-        str: TERMINATOR's response, or an error message if something went wrong
+        str: SYLPH's response, or an error message if something went wrong
     
     Note:
         - Creates a new session_id if one doesn't exist

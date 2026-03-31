@@ -4,11 +4,11 @@ import logging
 import os
 import time
 
-from app.services.groq_service import GroqService, escape_curly_braces,AllGroqApisFailedError
+from app.services.groq_service import GroqService, escape_curly_braces, AllGroqApisFailedError
 from app.services.vector_store import VectorStoreService
 # from app.utils.time_info import get_time_information
 from app.utils.retry import with_retry
-from config import REALTIME_CHAT_ADDENDUM,GROQ_API_KEYS,GROQ_MODEL
+from app.config import REALTIME_CHAT_ADDENDUM,GROQ_API_KEYS,GROQ_MODEL
 # from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 # from langchain_core.messages import HumanMessage, AIMessage
 

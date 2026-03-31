@@ -48,7 +48,7 @@ from app.services.vector_store import VectorStoreService
 from app.services.groq_service import GroqService
 from app.services.realtime_service import RealtimeGroqService
 from app.services.chat_service import ChatServices
-from config import VECTOR_STORE_DIR
+from app.config import VECTOR_STORE_DIR
 
 from langchain_community.vectorstores import FAISS
 

@@ -1,3 +1,20 @@
+Bishal Das is a Computer Science and Engineering student from Hooghly, West Bengal, India, currently pursuing a B.Tech degree. He is a passionate and driven developer with a strong interest in artificial intelligence, backend systems, automation, and intelligent software design.
+
+He enjoys building practical and creative technology solutions that combine logic, efficiency, and user experience. His technical interests include AI assistants, real-time systems, chatbot development, backend architecture, web applications, and automation tools. He works comfortably with Python and JavaScript, and also has experience with technologies and tools such as Tailwind CSS, JSON-based data systems, Groq API, Cohere API, Selenium, and GitHub.
+
+Bishal is known for building personal AI assistant projects with human-like conversational behavior, emotional expression through natural phrasing, and smart decision-making logic. He has worked on custom LLM-based assistants such as Niku, RAI, and EDITH-style systems, focusing on creating assistants that feel warm, natural, and emotionally expressive instead of robotic. He is particularly interested in designing assistant behavior, improving system prompts, structuring memory and chat logs, and making AI interactions feel more human.
+
+Beyond AI, he is also interested in web development and has built personal portfolio websites using HTML, CSS, JavaScript, and Tailwind CSS. He values clean design, responsive layouts, and thoughtful user interaction. He has also worked on project ideas related to smart city systems and traffic optimization, showing his interest in solving real-world problems through software.
+
+As a student, Bishal has handled a wide range of academic and technical topics, including artificial intelligence, software engineering, operating systems, object-oriented programming, compiler design, discrete mathematics, automata theory, environmental science, and design and analysis of algorithms. He has created multiple presentations, reports, coding assignments, and practical implementations as part of his academic journey, often balancing tight deadlines with strong attention to clarity and functionality.
+
+He is also actively improving his technical foundation by learning modern development practices and tools. He has studied Python fundamentals, NumPy, and is currently learning Pydantic. He prefers using efficient and modern workflows in his projects, including UV as a Python package installer. He is interested in building powerful AI systems that can automate tasks, generate and execute code, and serve as highly capable digital assistants.
+
+Bishal shares his work through GitHub and uses it as a platform to showcase his projects, experiments, and growth as a developer. He is a builder at heart—curious, ambitious, and always looking for ways to turn ideas into working systems. His overall goal is to become a highly skilled developer capable of creating intelligent applications that are useful, emotionally engaging, and technically strong.
+
+In summary, Bishal Das is a passionate CSE student and developer who is deeply focused on AI assistant development, backend logic, automation, and practical software engineering. He combines creativity with technical curiosity and continues to grow through consistent experimentation, project building, and a strong desire to create meaningful technology.
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 User: edit remember this you are a place of edit and you have to reply me one or two sentences and you are my assistant
 AI: I understand, I'll keep my responses brief and to the point as your assistant. What would you like me to help you edit today?

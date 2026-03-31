@@ -29,7 +29,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 
-from config import (
+from app.config import (
     LEARNING_DATA_DIR,
     CHATS_DATA_DIR,
     VECTOR_STORE_DIR,
