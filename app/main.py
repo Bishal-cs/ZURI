@@ -25,71 +25,69 @@ STARTUP:
     and chats_data/*.json, then creates Groq, Realtime, and Chat services. On shutdown,
     it saves all in-memory sessions to disk.
 """
+
+from curses import raw
+from email.mime import audio
+from pathlib import Path
+from urllib import response
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
 from contextlib import asynccontextmanager
 import uvicorn
 import logging
+import json
+import time
+import re
+import base64
 import asyncio
-import webbrowser
-import urllib.request
-import urllib.error
-from fastapi import Request
-from app.models import ChatRequest, ChatResponse
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import edge_tts
+from app.models import ChatRequest, ChatResponse, TTSRequest
 
-#user-frendly message When groq rate limit (daily token quota) in exceeded.
 RATE_LIMIT_MESSAGE = (
-    "you've reached your daily API limit for this assistant."
-    "your credits will reset in a few hours, or you can Upgrade Your Plan for more"
-    "Please try agen later."
+    "You've reached your daily API limit for this assistant. "
+    "Your credits will reset in a few hours, or you can upgrade your plan for more."
+    "Please try again later."
 )
 
 def _is_rate_limit_error(exc: Exception) -> bool:
-    msg = str(exc).lower()
+    msg = str(exc). lower()
     return "429" in str(exc) or "rate limit" in msg or "tokens per day" in msg
 
 from app.services.vector_store import VectorStoreService
-from app.services.groq_service import GroqService
+from app.services.groq_service import GroqService, AllGroqApisFailedError
 from app.services.realtime_service import RealtimeGroqService
-from app.services.chat_service import ChatServices
-from app.config import VECTOR_STORE_DIR
+from app.services.chat_service import ChatService
+from app.services.brain_service import BrainService
+from app.services.task_executor import TaskExecutor
+from app.services.vision_service import VisionService
+from app.services.task _manager import TaskManager
 
-from langchain_community.vectorstores import FAISS
-
-# -----------------------------------------------------------------------------
-# LOGGING
-# -----------------------------------------------------------------------------
-
+from config import (
+    VECTOR_STORE_DIR, GROQ_API_KEYS, GROQ_MODEL, TAVILY_API_KEY,
+    EMBEDDING_MODEL, CHUNK_SIZE, CHUNK_OVERLAP, MAX_CHAT_HISTORY_TURNS,
+    ASSISTANT_NAME, TTS_VOICE, TTS_RATE,
+)
 
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
+    level=logging. INFO,
+    format='%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s',
+    datefmt='%Y-%m-%d %H: %M:%S'
 )
 
 logger = logging.getLogger("S.Y.L.P.H")
-
-
-def is_url_accessible(url: str = "http://localhost:8000/") -> bool:
-    """Check if the local server URL is already reachable (to avoid duplicate browser open)."""
-    try:
-        with urllib.request.urlopen(url, timeout=1) as resp:
-            return resp.status == 200
-    except urllib.error.URLError:
-        return False
-    except Exception:
-        return False
-
-# -----------------------------------------------------------------------------
-# GLOBAL SERVICE REFERENCES
-# -----------------------------------------------------------------------------
-
 vector_store_service: VectorStoreService = None
-groq_service : GroqService = None
+groq_service: GroqService = None
 realtime_service: RealtimeGroqService = None
-chat_service: ChatServices = None
+brain_service: BrainService = None
+task_executor: TaskExecutor = None
+task_manager: TaskManager = None
+vision_service: VisionService = None
+chat_service: ChatService = None
 
 def print_title():
     """Print the S.Y.L.P.H ASCII art title."""
@@ -106,241 +104,550 @@ def print_title():
 
     print(title)
 
-
-
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    """"""
-    global vector_store_service, groq_service, realtime_service, chat_service
 
+async def lifespan(app: FastAPI):
+
+    global vector_store_service, groq_service, realtime_service, brain_service
+    global task_executor, task_manager, vision_service, chat_service
     print_title()
-    logger.info("="*60)
-    logger.info("S.Y.L.P.H - Starting Up...........")
-    logger.info("="*60)
+    logger.info("=" * 60)
+    logger.info("S.Y.L.P.H - Starting Up ... ")
+    logger.info("=" * 60)
+    logger.info("[CONFIG] Assistant name: %s", ASSISTANT_NAME)
+    logger.info("[CONFIG] Groq model: %s", GROQ_MODEL)
+    logger.info("[CONFIG] Groq API keys loaded: %d", len(GROQ_API_KEYS))
+    logger.info("[CONFIG] Tavily API key: %s", "configured" if TAVILY_API_KEY else "NOT SET")
+    logger.info("[CONFIG] Image generation: Pollinations.ai (free, no API key)")
+    logger.info("[CONFIG] Embedding model: %s", EMBEDDING_MODEL)
+    logger.info("[CONFIG] Chunk size: %d | Overlap: %d | Max history turns: %d",
+    CHUNK_SIZE, CHUNK_OVERLAP, MAX_CHAT_HISTORY_TURNS)
 
     try:
-        logger.info("Initializing vector store service.........")
+
+        logger.info("Initializing vector store service ... ")
+        t0 = time.perf_counter()
         vector_store_service = VectorStoreService()
         vector_store_service.create_vector_store()
-        logger.info("vector store Initialized Successfully")
-
-        logger.info("Initializing Groq service (general Querires).......")
+        logger.info("[TIMING] startup_vector_store: %.3fs", time.perf_counter() - t0)
+        logger.info("Initializing Groq service (general queries) ... ")
         groq_service = GroqService(vector_store_service)
-        logger.info("Groq service Initialized successfully")
-
-        logger.info("Initializing realtime groq service (with tavil search)......")
+        logger. info("Groq service initialized successfully")
+        logger.info("Initializing Realtime Groq service (with Tavily search) ... ")
         realtime_service = RealtimeGroqService(vector_store_service)
-        logger.info("Realtime Groq services Initialized Successfully")
+        logger.info("Realtime Groq service initialized successfully")
+        logger.info("Initializing Brain service (Groq query classification) ... ")
+        brain_service = BrainService(groq_service=groq_service)
+        logger.info("Brain service initialized successfully")
+        logger.info("Initializing Task executor ... ")
+        task_executor = TaskExecutor(groq_service=groq_service)
+        logger.info("Task executor initialized successfully")
+        logger.info("Initializing Background task manager ... ")
+        task_manager = TaskManager(task_executor=task_executor)
+        logger.info("Background task manager initialized successfully")
+        logger.info("Initializing Vision service (Groq) ... ")
+        vision_service = VisionService()
+        logger.info("Vision service initialized successfully")
+        logger.info("Initializing chat service ... ")
 
-        logger.info("Initializing chat Service...........")
-        chat_service = ChatServices(groq_service, realtime_service)
-        logger.info("Chat service Initialized Successfullly")
+        chat_service = ChatService(
+            groq_service, realtime_service, brain_service,
+            task_executor=task_executor,
+            vision_service=vision_service,
+            task_manager=task_manager,
+        )
 
-        logger.info("="*60)
-        logger.info("Service status:")
-        logger.info("   - Vector Store: Ready")
-        logger.info("   - Groq AI (Gerneal): Ready")
-        logger.info("   - Groq AI (Realtime): Ready")
-        logger.info("   - Chat Service: Ready")
-        logger.info("="*60)
-        logger.info("S.Y.L.P.H is online and ready")
-        logger.info("API http://localhost:8000")
-        logger.info("="*60)
-
-        # Auto-open browser when the site is not already reachable
-        if not is_url_accessible("http://localhost:8000/"):
-            webbrowser.open("http://localhost:8000")
-            logger.info("Opened browser to http://localhost:8000")
-        else:
-            logger.info("Local URL http://localhost:8000 already accessible; skipping browser open.")
+        logger.info("Chat service initialized successfully")
+        logger.info("=" * 60)
+        logger.info("Service Status:")
+        logger.info(" - Vector Store: Ready")
+        logger.info(" - Groq AI (General): Ready")
+        logger.info(" - Groq AI (Realtime): Ready")
+        logger.info(" - Brain (Unified Decision): Ready")
+        logger.info(" - Task Executor: Ready")
+        logger.info(" - Background Task Manager: Ready")
+        logger.info(" - Vision (Groq): Ready")
+        logger.info(" - Chat Service: Ready")
+        logger.info("=" * 60)
+        logger.info("S.Y.L.P.H is online and ready!")
+        logger.info("API: http://localhost:8000")
+        logger.info("Frontend: http://localhost:8000/app/ (open in browser)")
+        logger.info("=" * 60)
 
         yield
 
-        logger.info("\nShutting down S.Y.L.P.H..............")
+        logger.info("\nShutting down S.Y.L.P.H ... ")
+        _tts_pool.shutdown(wait=True)
+
+        if task_manager:
+            task_manager. shutdown()
+
         if chat_service:
             for session_id in list(chat_service.sessions.keys()):
                 chat_service.save_chat_session(session_id)
+
         logger.info("All sessions saved. Goodbye!")
-    
+
     except Exception as e:
-        logger.error(f"Fatal error during startup: {e}",exc_info=True)
+        logger.error(f"Fatal error during startup: {e}", exc_info=True)
         raise
 
-app = FastAPI(
-    title="S.Y.L.P.H API",
-    description="Just A Rather very Intelligent System",
-    lifespan=lifespan
-)
 
+app = FastAPI(
+    title="J.A.R.V.I.S API",
+    description="Just A Rather Very Intelligent System",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # ✅ CORRECT
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+class TimingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        t0 = time.perf_counter()
+        response = await call_next(request)
+        elapsed = time.perf_counter() - t0
+        path = request.url.path
+        logger.info("[REQUEST] %s %s -> %s (%.3fs)", request.method, path, response.status_code, elapsed)
+        return response
 
-@app.get("/")
-async def root():
+app.add_middleware(TimingMiddleware)
+
+@app.get("/api")
+
+async def api_info():
     return {
         "message": "S.Y.L.P.H API",
-        "endpoints": {
-            "/chat": "General chat (pure LLM, no web search)",
-            "/chat/realtime": "Realtime chat (with tavil search)",
+        " endpoints": {
+            "/chat": "General chat (non-streaming)",
+            "/chat/stream": "General chat (streaming chunks)",
+            "/chat/realtime": "Realtime chat (non-streaming)",
+            "/chat/realtime/stream": "Realtime chat (streaming chunks)",
+            "/chat/jarvis/stream": "Jarvis unified route (two-stage brain: classify > route > execute/stream)",
             "/chat/history/{session_id}": "Get chat history",
-            "/health": "System Health check"
+            "/tasks/{task_id}": "Get background task status and result",
+            "/health": "System health check",
+            "/tts": "Text-to-speech (POST text, returns streamed MP3)"
         }
     }
 
-def _health_payload():
-    return {
-        "status":"healthy",
-        "vector_store": vector_store_service is not None,
-        "groq_service": groq_service is not None,
-        "realtime_service": realtime_service is not None,
-        "chat_service": chat_service is not None
-    }
-
 @app.get("/health")
+
 async def health():
-    return _health_payload()
-
-@app.get("/api/health")
-async def api_health():
-    return _health_payload()
-
-@app.post("/api/chat", response_model=ChatResponse)
-async def api_chat(request: ChatRequest):
-    return await chat(request)
-
-@app.post("/api/chat/realtime", response_model=ChatResponse)
-async def api_chat_realtime(request: ChatRequest):
-    return await chat_realtime(request)
-
-@app.post("/api/chat/stream")
-async def api_chat_stream(request: ChatRequest):
-    return await chat_stream(request)
-
-@app.post("/api/chat/realtime/stream")
-async def api_chat_realtime_stream(request: ChatRequest):
-    return await chat_realtime_stream(request)
-
-@app.post("/api/chat/Sylph/stream")
-async def api_chat_sylph_stream(request: ChatRequest):
-    return await chat_sylph_stream(request)
+    try:
+        return {
+            "status": "healthy",
+            "vector_store": vector_store_service is not None,
+            "groq_service": groq_service is not None,
+            "realtime_service": realtime_service is not None,
+            "brain_service": brain_service is not None,
+            "task_executor": task_executor is not None,
+            "task_manager": task_manager is not None,
+            "vision_service": vision_service is not None,
+            "chat_service": chat_service is not None,
+        }
+    except Exception as e:
+        logger.warning("[API /health] Error: %s", e)
+        return {"status": "degraded", "error": str(e)}
 
 @app.post("/chat", response_model=ChatResponse)
+
 async def chat(request: ChatRequest):
+
     if not chat_service:
-        raise HTTPException(status_code=503, detail="Chat Service Not Initialized")
+        raise HTTPException(status_code=503, detail="Chat service not initialized")
+
+    logger.info("[API /chat] Incoming | session_id=%s | message_len=%d | message=%.100s",
+    request.session_id or "new", len(request.message), request.message)
 
     try:
+
         session_id = chat_service.get_or_create_session(request.session_id)
         response_text = chat_service.process_message(session_id, request.message)
         chat_service.save_chat_session(session_id)
-
+        logger.info("[API /chat] Done | session_id=%s | response_len=%d", session_id[:12], len(response_text))
         return ChatResponse(response=response_text, session_id=session_id)
 
     except ValueError as e:
-        logger.warning(f"Invalid session_id: {e}")
+        logger.warning("[API /chat] Invalid session_id: %s", e)
+        raise HTTPException(status_code=400, detail=str(e)) 
+
+    except AllGroqApisFailedError as e:
+        logger.error("[API /chat] All Groq APIs failed: %s", e)
+        raise HTTPException(status_code=503, detail=str(e))
+
+    except Exception as e:
+
+        if _is_rate_limit_error(e):
+            logger.warning("[API /chat] Rate limit hit: %s", e)
+            raise HTTPException(status_code=429, detail=RATE_LIMIT_MESSAGE)
+
+        logger.error("[API /chat] Error: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error processing chat: {str(e)}")
+    
+_SPLIT_RE = re.compile(r"( ?<= [. !? , ;: ])\s+")
+_MIN_WORDS_FIRST = 1
+_MIN_WORDS = 1
+_MERGE_IF_WORDS = 2
+_TTS_BUFFER_TIMEOUT = 2.0
+_TTS_BUFFER_MIN_WORDS = 4
+_ABBREV_HOLD_RE = re.compile(r"^( ?: Dr|Mr|Mrs|Ms|Prof|Sr|Jr|St|Vs|Etc)\.$", re.IGNORECASE)
+
+def _should_hold_sentence_for_continuation(sent: str) -> bool:
+
+    t = sent.strip()
+    if not t.endswith("."):
+        return False
+
+    words = t.split()
+
+    if len(words) != 1:
+        return False
+
+    return bool(_ABBREV_HOLD_RE.match(words[0]))
+
+def _split_sentences(buf: str):
+    parts = _SPLIT_RE.split(buf)
+
+    if len(parts) <= 1:
+        return [], buf
+
+    raw = [p.strip() for p in parts[ :- 1] if p.strip()]
+    sentences, pending = [], ""
+    
+    for s in raw:
+        if pending:
+            s = (pending + " " + s).strip()
+            pending = ""
+
+        min_req = _MIN_WORDS_FIRST if not sentences else _MIN_WORDS
+
+        if len(s.split()) < min_req:
+            pending = s
+        continue
+        sentences.append(s)
+
+    remaining = (pending + " " + parts[-1].strip()).strip() if pending else parts[-1].strip()
+    return sentences, remaining
+
+def merge_short(sentences):
+
+    if not sentences:
+        return []
+
+    merged, i = [], 0
+
+    while i < len(sentences):
+        cur = sentences[i]
+        j=i+1
+
+        while j < len(sentences) and len(sentences[j].split()) <= MERGE_IF_WORDS:
+            cur = (cur + " " + sentences[j]).strip()
+            j += 1
+
+    merged.append(cur)
+    i = j
+    return merged
+
+def _generate_tts_sync(text: str, voice: str, rate: str) -> bytes:
+
+    async def _inner():
+        communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
+        parts = []
+
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                parts.append(chunk["data"])
+
+        return b"".join(parts)
+
+    return asyncio.run(_inner())
+    
+_tts_pool = ThreadPoolExecutor(max_workers=4)
+
+def _stream_generator(session_id: str, chunk_iter, is_realtime: bool, tts_enabled: bool = False):
+    yield f"data: {json.dumps({'session_id': session_id, 'chunk': '', 'done': False})}\n\n"
+    buffer = ""
+    held = None
+    is_first = True
+    audio_queue = []
+    last_submit_time = time.perf_counter()
+
+    def _submit(text):
+        nonlocal last_submit_time
+
+        if not text or not text.strip():
+            return
+
+        audio_queue.append((_tts_pool.submit(_generate_tts_sync, text, TTS_VOICE, TTS_RATE), text))
+        last_submit_time = time.perf_counter()
+
+    def _drain_ready():
+        events = []
+
+        while audio_queue and audio_queue[0][0].done():
+            fut, sent = audio_queue.pop(0)
+
+            try:
+                audio = fut.result ()
+                b64 = base64.b64encode(audio).decode("ascii")
+                events.append(f"data: {json.dumps({'audio': b64, 'sentence': sent}) }\n\n")
+
+            except Exception as exc:
+                logger.warning("[TTS-INLINE] Failed for '%s': %s", sent[:40], exc)
+
+        return events
+
+    def _yield_completed_audio():
+
+        if not tts_enabled:
+            return
+        
+        for ev in _drain_ready():
+            yield 
+            
+        try:
+            for chunk in chunk_iter:
+                if isinstance(chunk, dict) and "_activity" in chunk:
+                    yield f"data: {json.dumps({'activity': chunk['_activity']}) }\n\n"
+                    yield from _yield_completed_audio()
+                    continue
+            
+                if isinstance(chunk, dict) and "_search_results" in chunk:
+                    yield f"data: {json.dumps({'search_results': chunk['_search_results']}) }\n\n"
+                    yield from _yield_completed_audio()
+                    continue
+
+                if isinstance(chunk, dict) and "_actions" in chunk:
+                    yield f"data: {json.dumps({'actions': chunk['_actions']})}\n\n"
+                    yield from _yield_completed_audio()
+                    continue
+
+                if isinstance(chunk, dict) and "_background_tasks" in chunk:
+                    yield f"data: {json.dumps({'background_tasks': chunk['_background_tasks']}) }\n\n"
+                    yield from _yield_completed_audio()
+                    continue
+
+                if not chunk:
+                    yield from _yield_completed_audio()
+                    continue
+
+                yield f"data: {json.dumps({'chunk': chunk, 'done': False})}\n\n"
+
+                if not tts_enabled:
+                    continue
+
+                yield from _yield_completed_audio()
+
+                buffer += chunk
+                sentences, buffer = _split_sentences(buffer)
+                sentences = merge_short(sentences)
+
+                if held and sentences and len(sentences[0].split()) <= _MERGE_IF_WORDS:
+                    held = (held + " " + sentences[0]).strip()
+                    sentences = sentences[1:]
+
+                for i, sent in enumerate(sentences):
+                    min_w = _MIN_WORDS_FIRST if is_first else _MIN_WORDS
+                    if len(sent.split()) < min_w:
+                        continue
+
+                is_last = (i == len(sentences) - 1)
+
+                if held:
+                    _submit(held)
+                    held = None
+                    is_first = False
+
+                if is_last and _should_hold_sentence_for_continuation(sent):
+                    held = sent
+
+                else:
+                    _submit(sent)
+                    is_first = False
+
+                if buffer and len(buffer.split()) >= _TTS_BUFFER_MIN_WORDS:
+                    if time.perf_counter() - last_submit_time > _TTS_BUFFER_TIMEOUT:
+
+                        if held:
+                            _submit(held)
+                            held = None
+                            is_first = False
+
+                        _submit(buffer.strip())
+                        buffer = ""
+                        is_first = False
+                yield from _yield_completed_audio()
+
+        except Exception as e:
+            for fut, _ in audio_queue:
+                fut.cancel()
+
+            yield f"data: {json.dumps({'chunk': '', 'done': True, 'error': str(e)})}\n\n"
+            return
+
+        if tts_enabled:
+            remaining = buffer.strip()
+
+            if held:
+
+                if remaining and len(remaining.split()) <= _MERGE_IF_WORDS:
+                   _submit((held + " " + remaining).strip())
+
+            else:
+                _submit(held)
+                if remaining:
+                    _submit(remaining)
+
+        elif remaining:
+            _submit(remaining)
+
+        for fut, sent in audio_queue:
+
+            try:
+                audio = fut.result(timeout=15)
+                b64 = base64.b64encode(audio).decode("ascii")
+                yield f"data: {json.dumps({'audio': b64, 'sentence': sent})}\n\n"
+
+            except FuturesTimeoutError:
+                logger.warning("[TTS-INLINE] Timeout for '%s' (15s)", (sent or "")[:40])
+
+            except Exception as exc:
+                logger.warning("[TTS-INLINE] Failed for '%s': %s", (sent or "") [:40], exc)
+                
+    yield f"data: {json.dumps({'chunk': '', 'done': True, 'session_id': session_id})}\n\n"
+
+@app.post("/chat/stream")
+
+async def chat_stream(request: ChatRequest):
+
+    if not chat_service:
+        raise HTTPException(status_code=503, detail="Chat service not initialized")
+
+    logger.info("[API /chat/stream] Incoming | session_id=%s | message_len=%d | message=%.100s",
+    request.session_id or "new", len(request.message), request.message)
+
+    try:
+        session_id = chat_service.get_or_create_session(request.session_id)
+
+        chunk_iter = chat_service.process_message_stream(session_id, request.message)
+        return StreamingResponse(
+        _stream_generator(session_id, chunk_iter, is_realtime=False, tts_enabled=request.tts),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    
+    except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    except AllGroqApisFailedError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     except Exception as e:
         if _is_rate_limit_error(e):
-            logger.warning(f"Rate limit hit: {e}")
             raise HTTPException(status_code=429, detail=RATE_LIMIT_MESSAGE)
 
-        logger.error(f"Error Processing Chat: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error processing chat: {str(e)}")
+        logger.error("[API /chat/stream] Error: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
-    
 @app.post("/chat/realtime", response_model=ChatResponse)
+
 async def chat_realtime(request: ChatRequest):
+
     if not chat_service:
-        raise HTTPException(status_code=503, detail="Chat Service Not Initialized")
-    
+        raise HTTPException(status_code=503, detail="Chat service not initialized")
+
     if not realtime_service:
-        raise HTTPException(status_code=503, detail="Realtime Service Not Initialized")
-    
+        raise HTTPException(status_code=503, detail="Realtime service not initialized")
+
+    logger.info("[API /chat/realtime] Incoming | session_id=%s | message_len=%d | message=%.100s",
+                request.session_id or "new", len(request.message), request.message)
+
     try:
         session_id = chat_service.get_or_create_session(request.session_id)
         response_text = chat_service.process_realtime_message(session_id, request.message)
         chat_service.save_chat_session(session_id)
+        logger. info("[API /chat/realtime] Done | session_id=%s | response_len=%d", session_id[:12], len(response_text))
         return ChatResponse(response=response_text, session_id=session_id)
-    
+
     except ValueError as e:
-        logger.warning(f"Invalid session_id: {e}")
+        logger.warning("[API /chat/realtime] Invalid session_id: %s", e)
         raise HTTPException(status_code=400, detail=str(e))
-    
+
+    except AllGroqApisFailedError as e:
+        logger.error("[API /chat/realtime] All Groq APIs failed: %s", e)
+        raise HTTPException(status_code=503, detail=str(e))
+
     except Exception as e:
         if _is_rate_limit_error(e):
-            logger.warning(f"Rate limit hit: {e}")
+            logger.warning("[API /chat/realtime] Rate limit hit: %s", e)
             raise HTTPException(status_code=429, detail=RATE_LIMIT_MESSAGE)
-        logger.error(f"Error processing realtime chat: {e}", exc_info=True)
+
+        logger.error("[API /chat/realtime] Error: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error processing chat: {str(e)}")
-    
-@app.post("/chat/stream")
-async def chat_stream(request: ChatRequest):
-    if not chat_service:
-        raise HTTPException(status_code=503, detail="Chat Service Not Initialized")
-
-    async def generate():
-        try:
-            session_id = chat_service.get_or_create_session(request.session_id)
-            response_text = await asyncio.get_event_loop().run_in_executor(None, chat_service.process_message, session_id, request.message)
-            await asyncio.get_event_loop().run_in_executor(None, chat_service.save_chat_session, session_id)
-            # Yield response as Server-Sent Events
-            for word in response_text.split():
-                yield f"data: {word}\n\n"
-                await asyncio.sleep(0.05)  # Small delay for streaming effect
-            yield "data: [DONE]\n\n"
-        except Exception as e:
-            yield f"data: Error: {str(e)}\n\n"
-
-    return StreamingResponse(generate(), media_type="text/event-stream")
 
 @app.post("/chat/realtime/stream")
+
 async def chat_realtime_stream(request: ChatRequest):
-    if not chat_service:
-        raise HTTPException(status_code=503, detail="chat service not initialized")
-    
-    if not realtime_service:
-        raise HTTPException(status_code=503, detail="Realtime Service Not initialized")
 
-    async def generate():
-        try:
-            session_id = chat_service.get_or_create_session(request.session_id)
-            response_text = await asyncio.get_event_loop().run_in_executor(None, chat_service.process_realtime_message, session_id, request.message)
-            await asyncio.get_event_loop().run_in_executor(None, chat_service.save_chat_session, session_id)
-            for word in response_text.split():
-                yield f"data: {word}\n\n"
-                await asyncio.sleep(0.05)
-            yield "data: [DONE]\n\n"
-        except Exception as e:
-            yield f"data: Error: {str(e)}\n\n"
+    if not chat_service or not realtime_service:
+        raise HTTPException(status_code=503, detail="Service not initialized")
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    logger.info("[API /chat/realtime/stream] Incoming | session_id=%s | message_len=%d | message=%.100s",
+                request.session_id or "new", len(request.message), request.message)
 
-@app.post("/chat/Sylph/stream")
-async def chat_sylph_stream(request: ChatRequest):
-    # Auto-route based on message content or something, but for now, use general
-    return await chat_stream(request)
-    
-@app.get("/chat/history/{session_id}")
-async def get_chat_history(session_id: str):
-    if not chat_service:
-        raise HTTPException(status_code=503, detail="Chat Service Not Initialized")
-    
     try:
-        messages = chat_service.get_chat_history(session_id)
-        return {
-            "session_id": session_id,
-            "messages": [{"role": msg.role, "content": msg.content} for msg in messages]
-        }
+        session_id = chat_service.get_or_create_session(request.session_id)
+        chunk_iter = chat_service.process_realtime_message_stream(session_id, request.message)
+        return StreamingResponse(
+            _stream_generator(session_id, chunk_iter, is_realtime=True, tts_enabled=request.tts),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    except AllGroqApisFailedError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error retrieving history: {str(e)}")
-    
+        if _is_rate_limit_error(e):
+           raise HTTPException(status_code=429, detail=RATE_LIMIT_MESSAGE)
+
+        logger.error("[API /chat/realtime/stream] Error: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/chat/jarvis/stream")
+
+async def chat_jarvis_stream(request: ChatRequest):
+
+    if not chat_service:
+    raise HTTPException(status_code=503, detail="Service not initialized")
+
+    logger.info("[API /chat/jarvis/stream] Incoming | session_id=%s | message_len=%d | img=%s | message=%.100s",
+    request.session_id or "new", len(request.message), "yes" if request.imgbase64 else "no", request.message)
+
+    try:
+    session_id = chat_service.get_or_create_session(request.session_id)
+    chunk_iter = chat_service.process_jarvis_message_stream(
+    session_id, request.message, imgbase64=request.imgbase64
+
+)
+
+return StreamingResponse(
+_stream_generator(session_id, chunk_iter, is_realtime=True, tts_enabled=request.tts),
+media_type="text/event-stream",
+headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+
+)
+ 
 
 def run():
     uvicorn.run(
